@@ -4,11 +4,9 @@
 
 dvar_t* sv_masterPort;
 dvar_t* sv_masterServer;
+dvar_t *sv_cracked;
 
 #define sv_masterAddress (*((netaddr_s*)( ADDR(0x019a6fe8, 0x0849fbe0) )))
-
-
-
 
 void SV_DirectConnect(netadrtype_e type, int32_t ip, uint32_t port, int32_t ipx1, int32_t ipx2)
 {
@@ -172,11 +170,19 @@ void server_hook_init_cvars()
 
         sv_masterServer = Dvar_RegisterString("sv_masterServer", "cod2master.activision.com", flags);
         sv_masterPort = Dvar_RegisterInt("sv_masterPort", 20710, 0, 65535, flags);
+        sv_cracked = Dvar_RegisterBool("sv_cracked", true, flags);
     }
 }
 
+const char * hook_AuthorizeState(int arg)
+{
+	const char *s = Cmd_Argv(arg);
 
+	if ( sv_cracked && strcmp(s, "deny") == 0 )
+		return "accept";
 
+	return s;
+}
 
 
 
@@ -209,7 +215,8 @@ void server_hook()
     patch_call(ADDR(0x004b88f6, 0x08096f94), (unsigned int)custom_SV_MasterAddress); // in SV_MasterHeartbeat
     patch_call(ADDR(0x004b8940, 0x08096fea), (unsigned int)custom_SV_MasterAddress); // in SV_MasterGameCompleteStatus
 
-
+    // Hook SV_IPAuthorize
+    patch_call(ADDR(0x00453630, 0x0808db12), (unsigned int)hook_AuthorizeState); // 
 
 
     // Fix "+smoke" bug
