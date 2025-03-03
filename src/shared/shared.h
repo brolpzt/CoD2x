@@ -40,7 +40,7 @@
 // Game protocol version,  115=1.0, 116=1.1, 117=1.3, 118=1.3, 119=1.3.Miscrosoft
 // CoD2x servers will have the new protocol number
 // When joining a server, the client will use the original 118 protocol to be able to connect old servers
-#define PROTOCOL_VERSION 120    // original 118
+#define PROTOCOL_VERSION 120   // original 118
 
 
 

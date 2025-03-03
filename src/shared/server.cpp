@@ -78,7 +78,6 @@ void SV_ClientBegin(int clientNum) {
     // Set client cvar g_cod2x
     // This will ensure that the same client side bug fixes are applied
     SV_SetClientCvar(clientNum, "g_cod2x", TOSTRING(APP_VERSION_PROTOCOL));
-
 }
 
 void SV_ClientBegin_Win32() {
@@ -178,7 +177,7 @@ const char * hook_AuthorizeState(int arg)
 {
 	const char *s = Cmd_Argv(arg);
 
-	if ( sv_cracked && strcmp(s, "deny") == 0 )
+	if (sv_cracked->value.string && strcmp(s, "deny") == 0)
 		return "accept";
 
 	return s;
@@ -215,8 +214,7 @@ void server_hook()
     patch_call(ADDR(0x004b88f6, 0x08096f94), (unsigned int)custom_SV_MasterAddress); // in SV_MasterHeartbeat
     patch_call(ADDR(0x004b8940, 0x08096fea), (unsigned int)custom_SV_MasterAddress); // in SV_MasterGameCompleteStatus
 
-    // Hook SV_IPAuthorize
-    patch_call(ADDR(0x00453630, 0x0808db12), (unsigned int)hook_AuthorizeState); // 
+    patch_call(ADDR(0x00453961, 0x0808db12), (unsigned int)hook_AuthorizeState); // SV_IPAuthorize
 
 
     // Fix "+smoke" bug

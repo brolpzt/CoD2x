@@ -6,6 +6,8 @@
     #include "../mss32/rinput.h"
     #include "../mss32/fps.h"
     #include "../mss32/game.h"
+    #include "../mss32/discord.h"
+    #include "../mss32/steam.h"
 #endif
 
 #if COD2X_LINUX
@@ -19,9 +21,6 @@
 //  - are used on both client and server side
 //  - are used in windows and linux version
 //
-
-
-
 
 /**
  * Com_Init
@@ -37,6 +36,9 @@ void __cdecl hook_Com_Init(char* cmdline) {
     Com_Printf("-----------------------------------\n");
     Com_Printf("CoD2x " APP_VERSION " loaded\n");
     Com_Printf("-----------------------------------\n");
+
+    start_discord_thread();
+    steam_init();
 
     #if COD2X_LINUX
         updater_hook_Com_Init();
