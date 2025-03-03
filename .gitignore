@@ -15,3 +15,4 @@ bin/windows/*/
 !bin/windows/pb/
 
 
+bin/windows/main/players/default/config_mp.cfg
