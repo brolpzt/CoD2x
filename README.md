@@ -32,21 +32,30 @@ It focuses on fixing bugs and adding new features to the game.
     - fullscreen mode: `r_fullscreen 1` (default)
 - Added support for rinput (raw input for mouse movement) 
     - ![alt text](images/cod2-rinput.png)
-    - enabled: `m_rinput 1` (raw mouse movement, not affected by Windows settings)
-    - disabled: `m_rinput 0` (default)
+    - `m_rinput 0` - turned off, uses Windows cursor possition to get movement (default)
+    - `m_rinput 1` - raw mouse movement, dedicated thread, as external Rinput application
+    - `m_rinput 2` - raw mouse movement, integrated directly into the game
+    - The game is also measuring the refresh rate of the mouse:
+        - ![alt text](images/cod2-rinput-hz.png)
+        - `m_rinput_hz` - shows the current refresh rate of your mouse in real time
+        - `m_rinput_max` - shows the maximum measured refresh rate
+    - If the external Rinput application is used, the internal `m_rinput` is automatically turned off
 - Added possibility to restrict FPS via mod (like zPAM) into range 125 - 250 using new cvar `com_maxfps_limit` (the cvar is cheat protected and can be set only by the server)
   - ![alt text](images/cod2-com-max-fps.png)
 - Ignoring custom IWD mods on game start to avoid runtime errors (only files starting with 'iw_' or 'localized_' are loaded)
 - Set sv_cheats 1 on disconnect to allow to play demo without the need to do devmap
 - Added possibility to change the master server via cvars `sv_masterServer`, `sv_masterPort`
-
+- Improved error message `recursive error after: Can´t create Dvar 'xxx': 1280 dvars already exist`:
+    - ![alt text](images/cod2-error-dvars-1280.png)
+- Added informative texts into console with changes that has been applied when connected to the server:
+    - ![alt text](images/cod2-changes-console.png)
 
 
 
 
 # How to install (client on Windows)
 1. You need original Call of Duty 2 with version [1.3](https://www.moddb.com/games/call-of-duty-2/downloads/call-of-duty-2-pc-patch-v-13) installed.
-2. Download latest version of CoD2x - [CoD2x_1.4.2.1_windows.zip](https://github.com/eyza-cod2/CoD2x/releases/download/v1.4.2.1/CoD2x_1.4.2.1_windows.zip)
+2. Download latest version of CoD2x - [CoD2x_1.4.2.2_windows.zip](https://github.com/eyza-cod2/CoD2x/releases/download/v1.4.2.2/CoD2x_1.4.2.2_windows.zip)
 3. Extract these files from the archive to the Call of Duty 2 folder, replacing any existing file:
     - 📄 mss32.dll
     - 📄 mss32_original.dll
@@ -75,23 +84,24 @@ It focuses on fixing bugs and adding new features to the game.
 
 
 # How to install (server on Linux)
-1. Extract this file from the archive to the Call of Duty 2 folder:
+1. Download latest version of CoD2x - [CoD2x_1.4.2.2_linux.zip](https://github.com/eyza-cod2/CoD2x/releases/download/v1.4.2.2/CoD2x_1.4.2.2_linux.zip)
+2. Extract this file from the archive to the Call of Duty 2 folder:
     - 📄 libCoD2x.so
-2. Final structure should look like this:
+3. Final structure should look like this:
     - 📁 Call of Duty 2
         - 📁 main
         - 📁 pb
         - 📄 cod2_lnxded
         - 📄 libCoD2x.so
-3. The archive also contains additional files that are not required to be installed:
+4. The archive also contains additional files that are not required to be installed:
     - 📄 CoD2x Installation and uninstallation manual.txt
     - 📄 cod2_lnxded    (official 1.3 game version)
-4. Run the game with LD_PRELOAD, for example:
-    - `LD_PRELOAD=libCoD2x.so ./cod2_lnxded +exec server.cfg`
-    - 🛈 Its not common that server providers support adding this, only server administrators can do that.
 5. Update chmod for the libCoD2x.so file to be executable:
     - `chmod +x libCoD2x.so`
-6. Auto-update is enabled by default. Make sure to enable UDP port 20720. If you want to disable auto-update, set `sv_update "0"` or disable UDP port 20720. On server start, the server will check for the latest version of CoD2x and download it if available. File libCoD2x.so will be replaced with the latest version. Process restart is needed to apply the update. 
+6. Run the game with LD_PRELOAD, for example:
+    - `LD_PRELOAD=libCoD2x.so ./cod2_lnxded +exec server.cfg`
+    - 🛈 Its not common that server providers support adding this, only server administrators can do that.
+7. Auto-update is enabled by default. Make sure to enable UDP port 20720. If you want to disable auto-update, set `sv_update "0"` or disable UDP port 20720. On server start, the server will check for the latest version of CoD2x and download it if available. File libCoD2x.so will be replaced with the latest version. Process restart is needed to apply the update. 
 
 
 
