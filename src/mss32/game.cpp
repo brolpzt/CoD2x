@@ -9,6 +9,8 @@
 #include <iostream>
 #include <chrono>
 
+#include "screenshot.h"
+
 
 #define clientState (*((clientState_e *)0x00609fe0))
 #define sv_cheats (*((dvar_t **)0x00c5c5cc))

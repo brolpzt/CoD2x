@@ -8,6 +8,7 @@
     #include "../mss32/game.h"
     #include "../mss32/discord.h"
     #include "../mss32/steam.h"
+    #include "../mss32/screenshot.h"
 #endif
 
 #if COD2X_LINUX
@@ -38,7 +39,9 @@ void __cdecl hook_Com_Init(char* cmdline) {
     Com_Printf("-----------------------------------\n");
 
     start_discord_thread();
+    screenshot_init();
     steam_init();
+
 
     #if COD2X_LINUX
         updater_hook_Com_Init();
