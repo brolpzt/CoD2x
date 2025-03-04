@@ -97,6 +97,8 @@
         "generator": "cpp",
         "print": "cpp",
         "text_encoding": "cpp",
-        "cassert": "cpp"
+        "cassert": "cpp",
+        "discord_game_sdk.h": "c",
+        "stdint.h": "c"
     }
 }

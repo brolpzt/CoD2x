@@ -26,7 +26,7 @@ void steam_init()
     char steamID64Str[64];
     snprintf(steamID64Str, sizeof(steamID64Str), "%llu", SteamAPI_ISteamUser_GetSteamID(SteamUser()));
 
-    g_steamid64 = Dvar_RegisterString("g_steamid64", steamID64Str, (dvarFlags_e)(DVAR_NOWRITE));
-    
+    g_steamid64 = Dvar_RegisterString("steam_id64", steamID64Str, (dvarFlags_e)(DVAR_NOWRITE));
+
     SteamAPI_Shutdown();
 }

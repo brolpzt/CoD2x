@@ -40,34 +40,9 @@ struct ActivityData
 // Declaração global da estrutura
 ActivityData ActivityData;
 
-bool is_discord_running()
-{
-    HANDLE hProcessSnap;
-    PROCESSENTRY32 pe32;
-    bool found = false;
-
-    hProcessSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hProcessSnap == INVALID_HANDLE_VALUE)
-        return false;
-
-    pe32.dwSize = sizeof(PROCESSENTRY32);
-    if (Process32First(hProcessSnap, &pe32))
-    {
-        do
-        {
-            if (_stricmp(pe32.szExeFile, "Discord.exe") == 0)
-            {
-                found = true;
-                break;
-            }
-        } while (Process32Next(hProcessSnap, &pe32));
-    }
-    CloseHandle(hProcessSnap);
-    return found;
-}
-
 void UpdateActivityCallback(void *data, enum EDiscordResult result)
 {
+    Com_Printf("Discord UpdateActivityCallback\n");
     DISCORD_REQUIRE(result);
 }
 
@@ -98,24 +73,26 @@ void discord_init()
         DiscordCreateParamsSetDefault(&params);
         params.client_id = 1345907074638417991; // Substitua com seu client_id
         params.flags = DiscordCreateFlags_Default;
-        DISCORD_REQUIRE(DiscordCreate(DISCORD_VERSION, &params, &discord.core));
+        DiscordCreate(DISCORD_VERSION, &params, &discord.core);
 
         // Obtém o gerenciador de atividades
         discord.activities = discord.core->get_activity_manager(discord.core);
 
         discordInitialized = true;
+
+        Com_Printf("discord_init()\n");
     }
 }
 
 void start_discord_thread()
 {
-    int numThreads = 3;
+    int numThreads = 1;
     StartThreads(numThreads);
 }
 
 void discord_loop()
 {
-    if (is_discord_running()) {
+    if (!discordInitialized) {
         discord_init();
     }
 
@@ -168,7 +145,9 @@ void discord_loop()
         SetActivity(&discord);
 
         // Chama os callbacks do Discord
-        DISCORD_REQUIRE(discord.core->run_callbacks(discord.core));
+        discord.core->run_callbacks(discord.core);
+
+        Com_Printf("discord_loop()\n");
     }
 }
 
@@ -178,7 +157,7 @@ DWORD WINAPI DiscordThread(LPVOID lpParam) {
         EnterCriticalSection(&criticalSection);
         discord_loop();
         LeaveCriticalSection(&criticalSection);
-        Sleep(15000);
+        Sleep(1000);
     }
     return 0;
 }
