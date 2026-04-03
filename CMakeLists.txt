@@ -104,7 +104,7 @@ if (WIN32)
     "${CMAKE_CURRENT_SOURCE_DIR}/tools/openssl_mingw/include/"
   )
 
-  # Per-language compile options, with DEBUG=1 defined in Debug mode
+  # Per-language compile options: Debug gets DEBUG=1; Release gets NDEBUG (quiet screenshot client logs, assert off).
   target_compile_options(mss32 PRIVATE
     $<$<OR:$<COMPILE_LANGUAGE:C>,$<COMPILE_LANGUAGE:CXX>>:
         -Wall -Wextra -Wno-unused-parameter -Wno-address-of-packed-member
@@ -113,6 +113,7 @@ if (WIN32)
         -DMG_TLS=MG_TLS_OPENSSL -DMG_ENABLE_POSIX_FS=0
         -fdiagnostics-color=always
         $<$<CONFIG:Debug>:-DDEBUG=1>
+        $<$<CONFIG:Release>:-DNDEBUG>
     >
     $<$<COMPILE_LANGUAGE:ASM_NASM>:
         -f win32

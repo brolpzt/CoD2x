@@ -44,7 +44,9 @@ VERSION_COMMA = $(VERSION_MAJOR),$(VERSION_MINOR),$(VERSION_PROTOCOL),$(VERSION_
 # ========================================================================================================
 # Directories and Files
 # ========================================================================================================
-DEBUG ?= 1
+# 0 = Release (default): production DLL, no DEBUG=1, mss32 defines NDEBUG (e.g. silent screenshot client logs).
+# 1 = Debug: verbose dev build (mingw32-make build_win DEBUG=1).
+DEBUG ?= 0
 
 ifeq ($(DEBUG),1)
 	BUILD_TYPE = Debug

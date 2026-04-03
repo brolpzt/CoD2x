@@ -21,6 +21,7 @@ bin/windows/*
 !bin/windows/mss32_original.dll
 !bin/windows/mss32.dll
 !bin/windows/version.inf
+!bin/windows/connect_local.bat
 
 # Ignore all folders in CoD2 windows folder except for main, miles, and pb
 bin/windows/*/

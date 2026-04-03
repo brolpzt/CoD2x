@@ -1065,7 +1065,7 @@ static bool screenshot_jpg_write_under_root(const char* root, const char* fname,
 	errBuf[0] = '\0';
 	if (!root || !root[0]) {
 		snprintf(errBuf, errCap, "%s: (empty)", rootLabel);
-		Com_Printf("screenshot_jpg: %s\n", errBuf);
+		Com_Printf("Screenshot: %s\n", errBuf);
 		return false;
 	}
 	char dir[384];
@@ -1076,10 +1076,10 @@ static bool screenshot_jpg_write_under_root(const char* root, const char* fname,
 	}
 #if COD2X_WIN32
 	if (_mkdir(dir) != 0 && errno != EEXIST)
-		Com_Printf("screenshot_jpg: %s: mkdir '%s' warning: %s\n", rootLabel, dir, strerror(errno));
+		Com_Printf("Screenshot: %s: mkdir '%s' warning: %s\n", rootLabel, dir, strerror(errno));
 #else
 	if (mkdir(dir, 0755) != 0 && errno != EEXIST)
-		Com_Printf("screenshot_jpg: %s: mkdir '%s' warning: %s\n", rootLabel, dir, strerror(errno));
+		Com_Printf("Screenshot: %s: mkdir '%s' warning: %s\n", rootLabel, dir, strerror(errno));
 #endif
 	const int nf = snprintf(fullOut, fullCap, "%s/%s", dir, fname);
 	if (nf <= 0 || nf >= (int)fullCap) {
@@ -1089,14 +1089,14 @@ static bool screenshot_jpg_write_under_root(const char* root, const char* fname,
 	FILE* f = fopen(fullOut, "wb");
 	if (!f) {
 		snprintf(errBuf, errCap, "%s: fopen '%s': %s", rootLabel, fullOut, strerror(errno));
-		Com_Printf("screenshot_jpg: %s\n", errBuf);
+		Com_Printf("Screenshot: %s\n", errBuf);
 		return false;
 	}
 	const size_t w = fwrite(data, 1, len, f);
 	fclose(f);
 	if (w != len) {
 		snprintf(errBuf, errCap, "%s: fwrite incomplete on '%s'", rootLabel, fullOut);
-		Com_Printf("screenshot_jpg: %s\n", errBuf);
+		Com_Printf("Screenshot: %s\n", errBuf);
 		return false;
 	}
 	return true;
@@ -1186,13 +1186,13 @@ static bool screenshot_jpg_save_file(const uint8_t* data, size_t len, char* logP
 	}
 	if (screenshot_jpg_write_under_root(base, fname, data, len, "fs_basepath", full, sizeof(full), err, sizeof(err))) {
 		snprintf(logPath, logPathCap, "%s", full);
-		Com_Printf("screenshot_jpg: note: saved under fs_basepath (fs_homepath failed or missing)\n");
+		Com_Printf("Screenshot: note: saved under fs_basepath (fs_homepath failed or missing)\n");
 		return true;
 	}
 
 	snprintf(logPath, logPathCap, "%s", err[0] ? err : "(no writable root)");
 	if (!home || !home[0])
-		Com_Printf("screenshot_jpg: fs_homepath unset; set +set fs_homepath <writable_dir> on the server.\n");
+		Com_Printf("Screenshot: fs_homepath unset; set +set fs_homepath <writable_dir> on the server.\n");
 	return false;
 }
 
@@ -1213,7 +1213,7 @@ static void SV_ConnectionlessPacket_screenshot_jpg(netaddr_s from, msg_t* msg)
 			const uint64_t now = ticks_ms();
 			if (now - s_rlLogMs > 3000) {
 				s_rlLogMs = now;
-				Com_Printf("screenshot_jpg: rate limit — dropping OOB chunks (check sv_rateLimiter)\n");
+				Com_Printf("Screenshot: rate limit — dropping OOB chunks (check sv_rateLimiter)\n");
 				screenshot_jpg_console_flush();
 			}
 			return;
@@ -1221,7 +1221,7 @@ static void SV_ConnectionlessPacket_screenshot_jpg(netaddr_s from, msg_t* msg)
 	}
 
 	if (Cmd_Argc() < 6) {
-		Com_Printf("screenshot_jpg: invalid packet (not enough args) from %s\n", NET_AdrToString(from));
+		Com_Printf("Screenshot: invalid packet (not enough args) from %s\n", NET_AdrToString(from));
 		screenshot_jpg_console_flush();
 		return;
 	}
@@ -1234,7 +1234,7 @@ static void SV_ConnectionlessPacket_screenshot_jpg(netaddr_s from, msg_t* msg)
 
 	if (total_size == 0 || total_size > SCREENSHOT_JPG_MAX_FILE || total_chunks == 0
 	    || payload_len == 0 || payload_len > SCREENSHOT_JPG_CHUNK) {
-		Com_Printf("screenshot_jpg: invalid parameters from %s (size=%u chunks=%u payload=%u)\n",
+		Com_Printf("Screenshot: invalid parameters from %s (size=%u chunks=%u payload=%u)\n",
 		    NET_AdrToString(from), total_size, total_chunks, payload_len);
 		screenshot_jpg_console_flush();
 		return;
@@ -1242,7 +1242,7 @@ static void SV_ConnectionlessPacket_screenshot_jpg(netaddr_s from, msg_t* msg)
 
 	const uint32_t need_chunks = (total_size + SCREENSHOT_JPG_CHUNK - 1u) / SCREENSHOT_JPG_CHUNK;
 	if (total_chunks != need_chunks) {
-		Com_Printf("screenshot_jpg: chunk count mismatch from %s (declared %u need %u for size %u)\n",
+		Com_Printf("Screenshot: chunk count mismatch from %s (declared %u need %u for size %u)\n",
 		    NET_AdrToString(from), total_chunks, need_chunks, total_size);
 		screenshot_jpg_console_flush();
 		return;
@@ -1257,7 +1257,7 @@ static void SV_ConnectionlessPacket_screenshot_jpg(netaddr_s from, msg_t* msg)
 			screenshot_jpg_free_slot(sl);
 		sl = screenshot_jpg_take_free_slot(from, session);
 		if (!sl) {
-			Com_Printf("screenshot_jpg: no free slots (max %i)\n", SCREENSHOT_JPG_MAX_SLOTS);
+			Com_Printf("Screenshot: no free slots (max %i)\n", SCREENSHOT_JPG_MAX_SLOTS);
 			screenshot_jpg_console_flush();
 			return;
 		}
@@ -1266,24 +1266,24 @@ static void SV_ConnectionlessPacket_screenshot_jpg(netaddr_s from, msg_t* msg)
 		sl->chunks_done = 0;
 		sl->buf = (uint8_t*)malloc(total_size);
 		if (!sl->buf) {
-			Com_Printf("screenshot_jpg: malloc(%u) failed\n", total_size);
+			Com_Printf("Screenshot: malloc(%u) failed\n", total_size);
 			screenshot_jpg_free_slot(sl);
 			screenshot_jpg_console_flush();
 			return;
 		}
 		sl->received = (uint8_t*)calloc(total_chunks, 1u);
 		if (!sl->received) {
-			Com_Printf("screenshot_jpg: calloc(received map) failed\n");
+			Com_Printf("Screenshot: calloc(received map) failed\n");
 			screenshot_jpg_free_slot(sl);
 			screenshot_jpg_console_flush();
 			return;
 		}
-		Com_Printf("screenshot_jpg: receiving from %s session %u, %u bytes (%u chunks)\n",
+		Com_Printf("Screenshot: receiving from %s session %u, %u bytes (%u chunks)\n",
 		    NET_AdrToString(from), session, total_size, total_chunks);
 		screenshot_jpg_console_flush();
 	} else {
 		if (!sl) {
-			Com_DPrintf("screenshot_jpg: orphan chunk (seq=%u) from %s\n", seq, NET_AdrToString(from));
+			Com_DPrintf("Screenshot: orphan chunk (seq=%u) from %s\n", seq, NET_AdrToString(from));
 			return;
 		}
 	}
@@ -1291,14 +1291,14 @@ static void SV_ConnectionlessPacket_screenshot_jpg(netaddr_s from, msg_t* msg)
 	sl->last_time = svs_time;
 
 	if (sl->total_size != total_size || sl->total_chunks != total_chunks || sl->session != session) {
-		Com_Printf("screenshot_jpg: metadata mismatch from %s — dropping transfer\n", NET_AdrToString(from));
+		Com_Printf("Screenshot: metadata mismatch from %s — dropping transfer\n", NET_AdrToString(from));
 		screenshot_jpg_free_slot(sl);
 		screenshot_jpg_console_flush();
 		return;
 	}
 
 	if (seq >= total_chunks) {
-		Com_Printf("screenshot_jpg: seq out of range from %s (seq=%u chunks=%u)\n",
+		Com_Printf("Screenshot: seq out of range from %s (seq=%u chunks=%u)\n",
 		    NET_AdrToString(from), seq, total_chunks);
 		screenshot_jpg_free_slot(sl);
 		screenshot_jpg_console_flush();
@@ -1309,7 +1309,7 @@ static void SV_ConnectionlessPacket_screenshot_jpg(netaddr_s from, msg_t* msg)
 	const uint32_t expected_len = (seq == total_chunks - 1u) ? (total_size - chunk_off) : SCREENSHOT_JPG_CHUNK;
 	if (expected_len == 0 || expected_len > SCREENSHOT_JPG_CHUNK || payload_len != expected_len
 	    || chunk_off + payload_len > total_size) {
-		Com_Printf("screenshot_jpg: bad chunk geometry from %s (seq=%u payload=%u expect=%u off=%u)\n",
+		Com_Printf("Screenshot: bad chunk geometry from %s (seq=%u payload=%u expect=%u off=%u)\n",
 		    NET_AdrToString(from), seq, payload_len, expected_len, chunk_off);
 		screenshot_jpg_free_slot(sl);
 		screenshot_jpg_console_flush();
@@ -1322,7 +1322,7 @@ static void SV_ConnectionlessPacket_screenshot_jpg(netaddr_s from, msg_t* msg)
 	}
 
 	if (!MSG_ReadData(msg, sl->buf + chunk_off, payload_len)) {
-		Com_Printf("screenshot_jpg: MSG_ReadData failed from %s (truncated UDP packet?)\n", NET_AdrToString(from));
+		Com_Printf("Screenshot: MSG_ReadData failed from %s (truncated UDP packet?)\n", NET_AdrToString(from));
 		screenshot_jpg_free_slot(sl);
 		screenshot_jpg_console_flush();
 		return;
@@ -1336,7 +1336,7 @@ static void SV_ConnectionlessPacket_screenshot_jpg(netaddr_s from, msg_t* msg)
 
 	for (uint32_t i = 0; i < sl->total_chunks; i++) {
 		if (!sl->received[i]) {
-			Com_Printf("screenshot_jpg: incomplete from %s (missing chunk %u after count hit — bug?)\n",
+			Com_Printf("Screenshot: incomplete from %s (missing chunk %u after count hit — bug?)\n",
 			    NET_AdrToString(from), i);
 			screenshot_jpg_free_slot(sl);
 			screenshot_jpg_console_flush();
@@ -1344,17 +1344,17 @@ static void SV_ConnectionlessPacket_screenshot_jpg(netaddr_s from, msg_t* msg)
 		}
 	}
 
-	Com_Printf("screenshot_jpg: assembly complete from %s, writing file...\n", NET_AdrToString(from));
+	Com_Printf("Screenshot: assembly complete from %s, writing file...\n", NET_AdrToString(from));
 	screenshot_jpg_console_flush();
 
 	if (!screenshot_jpg_com_append_oob_source(&sl->buf, &sl->total_size, from))
-		Com_DPrintf("screenshot_jpg: COM not stamped with OOB source (no COM after SOI?)\n");
+		Com_DPrintf("Screenshot: COM not stamped with OOB source (no COM after SOI?)\n");
 
 	char savedPath[512];
 	if (screenshot_jpg_save_file(sl->buf, sl->total_size, savedPath, sizeof(savedPath)))
-		Com_Printf("screenshot_jpg: SAVED %s (%u bytes) from %s\n", savedPath, sl->total_size, NET_AdrToString(from));
+		Com_Printf("Screenshot: SAVED %s (%u bytes) from %s\n", savedPath, sl->total_size, NET_AdrToString(from));
 	else
-		Com_Printf("screenshot_jpg: SAVE FAILED from %s — %s\n", NET_AdrToString(from), savedPath);
+		Com_Printf("Screenshot: SAVE FAILED from %s — %s\n", NET_AdrToString(from), savedPath);
 
 	screenshot_jpg_console_flush();
 	screenshot_jpg_free_slot(sl);
