@@ -4,10 +4,10 @@
 void screenshot_init();
 void screenshot_unload();
 
-/** Chamado no fim do desenho 2D (drawing_end). */
+/** Called at end of 2D draw pass (drawing_end). */
 void screenshot_on_drawing_end();
 
-/** Agenda captura no próximo drawing_end e envio JPEG ao servidor (servidor: getss -> `| takeScreenshot`). */
+/** Queue capture on next drawing_end and JPEG upload to server (server: getss -> `| takeScreenshot`). */
 void screenshot_schedule_capture(void);
 
 #endif

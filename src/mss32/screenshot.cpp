@@ -22,25 +22,91 @@
 extern dvar_t* sv_screenshotQuality;
 extern dvar_t* sv_screenshotJpgPaceMs;
 extern dvar_t* sv_screenshotJpgLowPriority;
+extern dvar_t* cl_hwid;
+extern dvar_t* cl_hwid2;
 
 static constexpr uint32_t SCREENSHOT_JPG_CHUNK = 1200;
 
 static std::atomic<bool> s_screenshotJpgSendBusy{false};
 
-/* IDirect3DDevice9* em gfx_d3d_mp_x86_s.dll (R_GetScreenshot) */
+/* IDirect3DDevice9* in gfx_d3d_mp_x86_s.dll (see R_GetScreenshot). */
 #define GFX_D3D_DEVICE_RVA 0x001d1bf8
 
 static bool s_captureRequested = false;
 
 static void screenshot_start_background_jpeg_upload(std::vector<uint8_t> bgra, int pitch, UINT w, UINT h, netaddr_s adr);
 
-/** dedicated 0 = cliente/listen; 1 = dedicado LAN; 2 = dedicado internet — sem renderer de cliente. */
+/** dedicated 0 = client/listen; 1 = LAN dedicated; 2 = internet dedicated — no client renderer. */
 static bool screenshot_disabled_on_dedicated(void)
 {
     return dedicated != nullptr && dedicated->value.integer != 0;
 }
 
-/** JPEG em memoria (WIC + IStream). */
+/** Strip control characters and tabs for a single COM segment (TAB-separated fields). */
+static void screenshot_com_sanitize_field(char* dst, size_t dstCap, const char* src)
+{
+    if (dstCap == 0)
+        return;
+    size_t w = 0;
+    if (src) {
+        for (; *src && w + 1 < dstCap; ++src) {
+            unsigned char c = (unsigned char)*src;
+            if (c == '\t' || c == '\n' || c == '\r')
+                dst[w++] = ' ';
+            else if (c >= 32u && c != 127u)
+                dst[w++] = (char)c;
+        }
+    }
+    dst[w] = '\0';
+}
+
+/**
+ * Insert JPEG COM segment (0xFFFE) immediately after SOI. UTF-8 text payload, kept small.
+ * Ls = 2 + payloadLen (big-endian); includes the 2-byte Ls field.
+ */
+static bool screenshot_jpeg_insert_com_after_soi(std::vector<uint8_t>& jpeg, const uint8_t* payload, size_t payloadLen)
+{
+    if (jpeg.size() < 2 || jpeg[0] != 0xFF || jpeg[1] != 0xD8)
+        return false;
+    if (payloadLen > 65533u)
+        return false;
+    const uint32_t Ls = (uint32_t)(2u + payloadLen);
+    if (Ls > 65535u)
+        return false;
+    uint8_t seg[4];
+    seg[0] = 0xFF;
+    seg[1] = 0xFE;
+    seg[2] = (uint8_t)((Ls >> 8) & 0xFF);
+    seg[3] = (uint8_t)(Ls & 0xFF);
+    jpeg.insert(jpeg.begin() + 2, seg, seg + 4);
+    jpeg.insert(jpeg.begin() + 6, payload, payload + payloadLen);
+    return true;
+}
+
+/**
+ * Format: C2x2\\t<name>\\t<cl_hwid>\\t<cl_hwid2> (HWID2 max 32).
+ * Player ip:port (UDP source) is appended to this COM by the server when saving the file.
+ */
+static void screenshot_jpeg_embed_player_com(std::vector<uint8_t>& jpeg)
+{
+    char nameBuf[96];
+    char h2Buf[40];
+    screenshot_com_sanitize_field(nameBuf, sizeof(nameBuf), Dvar_GetString("name"));
+    const int h1 = cl_hwid ? cl_hwid->value.integer : 0;
+    const char* raw2 = (cl_hwid2 && cl_hwid2->value.string) ? cl_hwid2->value.string : "";
+    screenshot_com_sanitize_field(h2Buf, sizeof(h2Buf), raw2);
+    if (strlen(h2Buf) > 32)
+        h2Buf[32] = '\0';
+
+    char payload[512];
+    const int n = snprintf(payload, sizeof(payload), "C2x2\t%s\t%d\t%s", nameBuf, h1, h2Buf);
+    if (n <= 0 || (size_t)n >= sizeof(payload))
+        return;
+    if (!screenshot_jpeg_insert_com_after_soi(jpeg, reinterpret_cast<const uint8_t*>(payload), (size_t)n))
+        Com_DPrintf("screenshot: COM segment not inserted.\n");
+}
+
+/** Encode JPEG in memory (WIC + IStream). */
 static bool screenshot_encode_jpeg_wic_memory(const uint8_t* abgra, int srcPitch, UINT width, UINT height, float quality01,
                                               std::vector<uint8_t>& out)
 {
@@ -178,7 +244,7 @@ static bool screenshot_encode_jpeg_wic_memory(const uint8_t* abgra, int srcPitch
     return true;
 }
 
-/** Copia o backbuffer para RAM (BGRA). */
+/** Copy backbuffer to RAM (BGRA). */
 static bool screenshot_grab_backbuffer(std::vector<uint8_t>& bgra, int* outPitch, UINT* outW, UINT* outH)
 {
     if (screenshot_disabled_on_dedicated() || !gfx_module_addr)
@@ -235,7 +301,7 @@ void screenshot_schedule_capture(void)
     if (screenshot_disabled_on_dedicated())
         return;
     if (!gfx_module_addr) {
-        Com_Printf("screenshot: gfx ainda nao carregado; entra num mapa e tenta de novo.\n");
+        Com_Printf("screenshot: gfx not loaded yet; join a map and try again.\n");
         return;
     }
     if (s_captureRequested)
@@ -250,18 +316,18 @@ void screenshot_on_drawing_end() {
     s_captureRequested = false;
 
     if (clientState < CLIENT_STATE_CONNECTED) {
-        Com_Printf("screenshot (getss): ignorado - nao ligado ao servidor.\n");
+        Com_Printf("screenshot (getss): ignored — not connected to a server.\n");
         return;
     }
 
     const netaddr_s adr = cl_serverAddress;
     if (adr.type == NA_BAD || adr.type == NA_INIT) {
-        Com_Printf("screenshot (getss): endereco do servidor invalido.\n");
+        Com_Printf("screenshot (getss): invalid server address.\n");
         return;
     }
 
     if (s_screenshotJpgSendBusy.exchange(true)) {
-        Com_Printf("screenshot (getss): ignorado - upload JPEG ja em curso (outro getss).\n");
+        Com_Printf("screenshot (getss): ignored — JPEG upload already in progress (another getss).\n");
         return;
     }
 
@@ -270,17 +336,17 @@ void screenshot_on_drawing_end() {
     UINT width = 0, height = 0;
     if (!screenshot_grab_backbuffer(bgra, &pitch, &width, &height)) {
         s_screenshotJpgSendBusy.store(false);
-        Com_Printf("screenshot (getss): captura falhou (entra num mapa com vista 3D).\n");
+        Com_Printf("screenshot (getss): capture failed (join a map with a 3D view).\n");
         return;
     }
 
-    Com_Printf("screenshot (getss): a codificar e enviar ao servidor...\n");
+    Com_Printf("screenshot (getss): encoding and uploading to server...\n");
     screenshot_start_background_jpeg_upload(std::move(bgra), pitch, width, height, adr);
 }
 
 void screenshot_init() {
     s_captureRequested = false;
-    /* Qualidade / pacing / prioridade: cvars sv_* registados em server_init() (DVAR_SYSTEMINFO). */
+    /* Quality / pacing / thread priority: sv_* cvars registered in server_init() (DVAR_SYSTEMINFO). */
 }
 
 void screenshot_unload() {
@@ -307,14 +373,14 @@ static bool screenshot_net_send_jpeg_chunks(netaddr_s adr, const uint8_t* data, 
         const int ln = snprintf(line, sizeof(line), "screenshot_jpg %u %u %u %u %u\n",
             sid, seq, total_chunks, total_size, chunk_len);
         if (ln <= 0 || ln >= (int)sizeof(line)) {
-            Com_Printf("screenshot_jpg: linha OOB demasiado longa.\n");
+            Com_Printf("screenshot_jpg: OOB line too long.\n");
             return false;
         }
 
         const int line_len = (int)strlen(line);
         const int pktlen = 4 + line_len + (int)chunk_len;
         if (pktlen > (int)sizeof(packet)) {
-            Com_Printf("screenshot_jpg: pacote interno demasiado grande.\n");
+            Com_Printf("screenshot_jpg: internal packet too large.\n");
             return false;
         }
 
@@ -323,7 +389,7 @@ static bool screenshot_net_send_jpeg_chunks(netaddr_s adr, const uint8_t* data, 
         memcpy(packet + 4 + (size_t)line_len, data + offset, chunk_len);
 
         if (!NET_SendPacket(NS_CLIENT, pktlen, packet, adr)) {
-            Com_Printf("screenshot_jpg: NET_SendPacket falhou no chunk %u\n", seq);
+            Com_Printf("screenshot_jpg: NET_SendPacket failed on chunk %u\n", seq);
             return false;
         }
 
@@ -338,7 +404,7 @@ static bool screenshot_net_send_jpeg_chunks(netaddr_s adr, const uint8_t* data, 
             Sleep(0);
     }
 
-    Com_Printf("screenshot_jpg: upload concluido %u bytes (%u chunks), session %u.\n",
+    Com_Printf("screenshot_jpg: upload finished %u bytes (%u chunks), session %u.\n",
                total_size, total_chunks, sid);
     return true;
 }
@@ -366,10 +432,12 @@ static void screenshot_start_background_jpeg_upload(std::vector<uint8_t> bgra, i
 
         std::vector<uint8_t> jpeg;
         if (!screenshot_encode_jpeg_wic_memory(bgra.data(), pitch, w, h, qf, jpeg)) {
-            Com_Printf("screenshot: codificacao JPEG falhou.\n");
+            Com_Printf("screenshot: JPEG encoding failed.\n");
             CoUninitialize();
             return;
         }
+
+        screenshot_jpeg_embed_player_com(jpeg);
 
         screenshot_net_send_jpeg_chunks(adr, jpeg.data(), (uint32_t)jpeg.size());
         CoUninitialize();

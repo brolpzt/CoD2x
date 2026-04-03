@@ -243,7 +243,7 @@ inline char* MSG_ReadString(msg_t* msg) {
 }
 #endif
 
-/** Leitura byte-aligned (equivalente ao MSG_ReadData do motor). */
+/** Byte-aligned read (equivalent to engine MSG_ReadData). */
 inline bool MSG_ReadData(msg_t* msg, void* dest, size_t len) {
 	if (!msg || !dest || msg->overflowed)
 		return false;

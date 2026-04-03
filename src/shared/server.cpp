@@ -1,5 +1,17 @@
 #include "server.h"
 
+#include <cstdio>
+#include <cerrno>
+#include <chrono>
+#include <ctime>
+#include <cstring>
+#include <cstdlib>
+#if COD2X_WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
+
 #include "shared.h"
 #include "animation.h"
 #include "cod2_common.h"
@@ -37,7 +49,7 @@ dvar_t*		showpacketstrings;
 dvar_t*		sv_playerBroadcastLimit;
 int 		nextIPTime = 0;
 dvar_t*		g_competitive;
-/** Sincronizados para o cliente (DVAR_SYSTEMINFO); usados no envio JPEG apos getss. */
+/** Synced to client (DVAR_SYSTEMINFO); used for JPEG upload after getss. */
 dvar_t*		sv_screenshotQuality;
 dvar_t*		sv_screenshotJpgPaceMs;
 dvar_t*		sv_screenshotJpgLowPriority;
@@ -59,7 +71,7 @@ static leakyBucket_t* bucketHashes[ MAX_HASHES ];
 leakyBucket_t outboundLeakyBucket = {};
 leakyBucket_t outboundLeakyBucketRcon = {};
 leakyBucket_t outboundLeakyBucketDisconnect = {};
-/** Limite OOB global para screenshot_jpg (separado de getstatus/getinfo). */
+/** Global OOB rate limit for screenshot_jpg (separate from getstatus/getinfo). */
 leakyBucket_t screenshotJpgOobLeakyBucket = {};
 
 static long SVC_HashForAddress( netaddr_s address )
@@ -537,7 +549,7 @@ void server_cmd_getIp()
 	}
 }
 
-/** Consola dedicada: `getss <clientnum>` — pede screenshot ao cliente (OOB `screenshot_jpg`, sem gravar disco no cliente). */
+/** Dedicated console: `getss <clientnum>` — request screenshot from client (OOB `screenshot_jpg`, no local disk write on client). */
 void server_cmd_getss()
 {
 	if (Cmd_Argc() < 2) {
@@ -546,12 +558,12 @@ void server_cmd_getss()
 	}
 	const int clientNum = atoi(Cmd_Argv(1));
 	if (clientNum < 0 || clientNum >= MAX_CLIENTS) {
-		Com_Printf("getss: client %i invalido (use 0..%i)\n", clientNum, MAX_CLIENTS - 1);
+		Com_Printf("getss: client %i invalid (use 0..%i)\n", clientNum, MAX_CLIENTS - 1);
 		return;
 	}
 	client_t& cl = svs_clients[clientNum];
 	if (cl.state == CS_FREE || cl.state == CS_ZOMBIE) {
-		Com_Printf("getss: slot %i vazio (state=%i)\n", clientNum, (int)cl.state);
+		Com_Printf("getss: slot %i empty (state=%i)\n", clientNum, (int)cl.state);
 		return;
 	}
 	char msg[64];
@@ -948,7 +960,7 @@ bool server_isRateLimitOk(leakyBucket_t* bucket, netaddr_s from, const char* act
 	return true;
 };
 
-// ---- OOB JPEG em chunks (cliente -> servidor) ----
+// ---- OOB chunked JPEG (client -> server) ----
 #define SCREENSHOT_JPG_CHUNK 1200
 #define SCREENSHOT_JPG_MAX_FILE (8 * 1024 * 1024)
 #define SCREENSHOT_JPG_MAX_SLOTS 8
@@ -960,9 +972,9 @@ struct screenshot_jpg_slot_t {
 	uint32_t session;
 	uint32_t total_size;
 	uint32_t total_chunks;
-	uint32_t next_seq;
-	uint32_t write_off;
+	uint32_t chunks_done; /* distinct chunk indices stored */
 	uint8_t* buf;
+	uint8_t* received; /* one byte per chunk index; out-of-order UDP safe */
 	int last_time;
 };
 
@@ -970,6 +982,10 @@ static screenshot_jpg_slot_t screenshot_jpg_slots[SCREENSHOT_JPG_MAX_SLOTS];
 
 static void screenshot_jpg_free_slot(screenshot_jpg_slot_t* sl)
 {
+	if (sl->received) {
+		free(sl->received);
+		sl->received = nullptr;
+	}
 	if (sl->buf) {
 		free(sl->buf);
 		sl->buf = nullptr;
@@ -1017,13 +1033,196 @@ static screenshot_jpg_slot_t* screenshot_jpg_take_free_slot(netaddr_s from, uint
 	return nullptr;
 }
 
+/** Filename: Y-m-d_H-i-s-milliseconds.jpg (local time, 3-digit ms). */
+static bool screenshot_jpg_build_timestamp_filename(char* out, size_t outCap)
+{
+	const auto now = std::chrono::system_clock::now();
+	const long long epoch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+	    now.time_since_epoch()).count();
+	const std::time_t t = static_cast<std::time_t>(epoch_ms / 1000);
+	const int ms = static_cast<int>(epoch_ms % 1000);
+	std::tm tm{};
+#if COD2X_WIN32
+	if (localtime_s(&tm, &t) != 0)
+		return false;
+#else
+	if (localtime_r(&t, &tm) == nullptr)
+		return false;
+#endif
+	const int n = snprintf(out, outCap, "%04d-%02d-%02d_%02d-%02d-%02d-%03d.jpg",
+	    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+	    tm.tm_hour, tm.tm_min, tm.tm_sec, ms);
+	return n > 0 && (size_t)n < outCap;
+}
+
+/**
+ * Write <root>/screenshots/<fname>. Dedicated Linux hosts often have a read-only or wrong
+ * fs_homepath; fs_basepath (install dir) is tried second. Logs errno on failure for remote debug.
+ */
+static bool screenshot_jpg_write_under_root(const char* root, const char* fname, const uint8_t* data, size_t len,
+    const char* rootLabel, char* fullOut, size_t fullCap, char* errBuf, size_t errCap)
+{
+	errBuf[0] = '\0';
+	if (!root || !root[0]) {
+		snprintf(errBuf, errCap, "%s: (empty)", rootLabel);
+		Com_Printf("screenshot_jpg: %s\n", errBuf);
+		return false;
+	}
+	char dir[384];
+	const int nd = snprintf(dir, sizeof(dir), "%s/screenshots", root);
+	if (nd <= 0 || nd >= (int)sizeof(dir)) {
+		snprintf(errBuf, errCap, "%s: screenshots path too long", rootLabel);
+		return false;
+	}
+#if COD2X_WIN32
+	if (_mkdir(dir) != 0 && errno != EEXIST)
+		Com_Printf("screenshot_jpg: %s: mkdir '%s' warning: %s\n", rootLabel, dir, strerror(errno));
+#else
+	if (mkdir(dir, 0755) != 0 && errno != EEXIST)
+		Com_Printf("screenshot_jpg: %s: mkdir '%s' warning: %s\n", rootLabel, dir, strerror(errno));
+#endif
+	const int nf = snprintf(fullOut, fullCap, "%s/%s", dir, fname);
+	if (nf <= 0 || nf >= (int)fullCap) {
+		snprintf(errBuf, errCap, "%s: full path too long", rootLabel);
+		return false;
+	}
+	FILE* f = fopen(fullOut, "wb");
+	if (!f) {
+		snprintf(errBuf, errCap, "%s: fopen '%s': %s", rootLabel, fullOut, strerror(errno));
+		Com_Printf("screenshot_jpg: %s\n", errBuf);
+		return false;
+	}
+	const size_t w = fwrite(data, 1, len, f);
+	fclose(f);
+	if (w != len) {
+		snprintf(errBuf, errCap, "%s: fwrite incomplete on '%s'", rootLabel, fullOut);
+		Com_Printf("screenshot_jpg: %s\n", errBuf);
+		return false;
+	}
+	return true;
+}
+
+/** Sanitize one TAB-separated COM field (same rules as client screenshot_com_sanitize_field). */
+static void screenshot_jpg_com_sanitize_field(char* dst, size_t dstCap, const char* src)
+{
+	if (dstCap == 0)
+		return;
+	size_t w = 0;
+	if (src) {
+		for (; *src && w + 1 < dstCap; ++src) {
+			unsigned char c = (unsigned char)*src;
+			if (c == '\t' || c == '\n' || c == '\r')
+				dst[w++] = ' ';
+			else if (c >= 32u && c != 127u)
+				dst[w++] = (char)c;
+		}
+	}
+	dst[w] = '\0';
+}
+
+/**
+ * Append TAB + OOB source address (player ip:port) to the first JPEG COM (0xFFFE) right after SOI.
+ * CoD2x client always inserts that COM; if missing or malformed, returns false and leaves buffer unchanged.
+ */
+static bool screenshot_jpg_com_append_oob_source(uint8_t** pbuf, uint32_t* ptotal_size, netaddr_s from)
+{
+	uint8_t* buf = *pbuf;
+	uint32_t total = *ptotal_size;
+	if (!buf || total < 8)
+		return false;
+	if (buf[0] != 0xFF || buf[1] != 0xD8 || buf[2] != 0xFF || buf[3] != 0xFE)
+		return false;
+	const uint32_t Ls = ((uint32_t)buf[4] << 8) | (uint32_t)buf[5];
+	if (Ls < 2u || Ls > 65535u)
+		return false;
+	const uint32_t paylen = Ls - 2u;
+	if (6u + paylen > total)
+		return false;
+
+	char suffix[80];
+	screenshot_jpg_com_sanitize_field(suffix, sizeof(suffix), NET_AdrToString(from));
+	const size_t slen = strlen(suffix);
+	const size_t extra = 1u + slen; /* TAB + field */
+	const uint32_t newLs = Ls + (uint32_t)extra;
+	if (newLs > 65535u || (uint64_t)total + extra > (uint64_t)SCREENSHOT_JPG_MAX_FILE)
+		return false;
+
+	uint8_t* nbuf = (uint8_t*)realloc(buf, (size_t)total + extra);
+	if (!nbuf)
+		return false;
+	buf = nbuf;
+	*pbuf = nbuf;
+
+	const uint32_t tail_off = 6u + paylen;
+	const uint32_t tail_len = total - tail_off;
+	if (tail_len)
+		memmove(buf + tail_off + extra, buf + tail_off, (size_t)tail_len);
+	buf[tail_off] = '\t';
+	if (slen)
+		memcpy(buf + tail_off + 1, suffix, slen);
+
+	buf[4] = (uint8_t)((newLs >> 8) & 0xFF);
+	buf[5] = (uint8_t)(newLs & 0xFF);
+	*ptotal_size = total + (uint32_t)extra;
+	return true;
+}
+
+static bool screenshot_jpg_save_file(const uint8_t* data, size_t len, char* logPath, size_t logPathCap)
+{
+	logPath[0] = '\0';
+	char fname[48];
+	if (!screenshot_jpg_build_timestamp_filename(fname, sizeof(fname))) {
+		snprintf(logPath, logPathCap, "(timestamp failed)");
+		return false;
+	}
+	char full[512];
+	char err[384];
+	const char* home = Dvar_GetString("fs_homepath");
+	const char* base = Dvar_GetString("fs_basepath");
+
+	if (screenshot_jpg_write_under_root(home, fname, data, len, "fs_homepath", full, sizeof(full), err, sizeof(err))) {
+		snprintf(logPath, logPathCap, "%s", full);
+		return true;
+	}
+	if (screenshot_jpg_write_under_root(base, fname, data, len, "fs_basepath", full, sizeof(full), err, sizeof(err))) {
+		snprintf(logPath, logPathCap, "%s", full);
+		Com_Printf("screenshot_jpg: note: saved under fs_basepath (fs_homepath failed or missing)\n");
+		return true;
+	}
+
+	snprintf(logPath, logPathCap, "%s", err[0] ? err : "(no writable root)");
+	if (!home || !home[0])
+		Com_Printf("screenshot_jpg: fs_homepath unset; set +set fs_homepath <writable_dir> on the server.\n");
+	return false;
+}
+
+static void screenshot_jpg_console_flush(void)
+{
+	(void)fflush(stdout);
+	(void)fflush(stderr);
+}
+
 static void SV_ConnectionlessPacket_screenshot_jpg(netaddr_s from, msg_t* msg)
 {
-	if (!server_isRateLimitOk(&screenshotJpgOobLeakyBucket, from, "OOB_screenshot_jpg", 80, 1000, 512, 1000))
-		return;
+	/* Each JPEG chunk is a separate OOB packet. Per-IP limits (e.g. 80/s) and a tight global
+	 * cap (512/s) drop most chunks while the client still reports successful UDP sends, so the
+	 * transfer never completes and nothing is saved. Use only a loose global leaky bucket. */
+	if (sv_rateLimiter->value.boolean) {
+		if (SVC_RateLimit(&screenshotJpgOobLeakyBucket, 20000, 1000)) {
+			static uint64_t s_rlLogMs;
+			const uint64_t now = ticks_ms();
+			if (now - s_rlLogMs > 3000) {
+				s_rlLogMs = now;
+				Com_Printf("screenshot_jpg: rate limit — dropping OOB chunks (check sv_rateLimiter)\n");
+				screenshot_jpg_console_flush();
+			}
+			return;
+		}
+	}
 
 	if (Cmd_Argc() < 6) {
-		Com_DPrintf("screenshot_jpg: argc insuficiente\n");
+		Com_Printf("screenshot_jpg: invalid packet (not enough args) from %s\n", NET_AdrToString(from));
+		screenshot_jpg_console_flush();
 		return;
 	}
 
@@ -1035,13 +1234,17 @@ static void SV_ConnectionlessPacket_screenshot_jpg(netaddr_s from, msg_t* msg)
 
 	if (total_size == 0 || total_size > SCREENSHOT_JPG_MAX_FILE || total_chunks == 0
 	    || payload_len == 0 || payload_len > SCREENSHOT_JPG_CHUNK) {
-		Com_DPrintf("screenshot_jpg: parametros invalidos\n");
+		Com_Printf("screenshot_jpg: invalid parameters from %s (size=%u chunks=%u payload=%u)\n",
+		    NET_AdrToString(from), total_size, total_chunks, payload_len);
+		screenshot_jpg_console_flush();
 		return;
 	}
 
 	const uint32_t need_chunks = (total_size + SCREENSHOT_JPG_CHUNK - 1u) / SCREENSHOT_JPG_CHUNK;
 	if (total_chunks != need_chunks) {
-		Com_DPrintf("screenshot_jpg: total_chunks incoerente com total_size\n");
+		Com_Printf("screenshot_jpg: chunk count mismatch from %s (declared %u need %u for size %u)\n",
+		    NET_AdrToString(from), total_chunks, need_chunks, total_size);
+		screenshot_jpg_console_flush();
 		return;
 	}
 
@@ -1054,22 +1257,33 @@ static void SV_ConnectionlessPacket_screenshot_jpg(netaddr_s from, msg_t* msg)
 			screenshot_jpg_free_slot(sl);
 		sl = screenshot_jpg_take_free_slot(from, session);
 		if (!sl) {
-			Com_Printf("screenshot_jpg: sem slots livres (max %i)\n", SCREENSHOT_JPG_MAX_SLOTS);
+			Com_Printf("screenshot_jpg: no free slots (max %i)\n", SCREENSHOT_JPG_MAX_SLOTS);
+			screenshot_jpg_console_flush();
 			return;
 		}
 		sl->total_size = total_size;
 		sl->total_chunks = total_chunks;
-		sl->next_seq = 0;
-		sl->write_off = 0;
+		sl->chunks_done = 0;
 		sl->buf = (uint8_t*)malloc(total_size);
 		if (!sl->buf) {
-			Com_Printf("screenshot_jpg: malloc(%u) falhou\n", total_size);
+			Com_Printf("screenshot_jpg: malloc(%u) failed\n", total_size);
 			screenshot_jpg_free_slot(sl);
+			screenshot_jpg_console_flush();
 			return;
 		}
+		sl->received = (uint8_t*)calloc(total_chunks, 1u);
+		if (!sl->received) {
+			Com_Printf("screenshot_jpg: calloc(received map) failed\n");
+			screenshot_jpg_free_slot(sl);
+			screenshot_jpg_console_flush();
+			return;
+		}
+		Com_Printf("screenshot_jpg: receiving from %s session %u, %u bytes (%u chunks)\n",
+		    NET_AdrToString(from), session, total_size, total_chunks);
+		screenshot_jpg_console_flush();
 	} else {
 		if (!sl) {
-			Com_DPrintf("screenshot_jpg: chunk orfao (seq=%u)\n", seq);
+			Com_DPrintf("screenshot_jpg: orphan chunk (seq=%u) from %s\n", seq, NET_AdrToString(from));
 			return;
 		}
 	}
@@ -1077,49 +1291,72 @@ static void SV_ConnectionlessPacket_screenshot_jpg(netaddr_s from, msg_t* msg)
 	sl->last_time = svs_time;
 
 	if (sl->total_size != total_size || sl->total_chunks != total_chunks || sl->session != session) {
-		Com_DPrintf("screenshot_jpg: metadados inconsistentes\n");
+		Com_Printf("screenshot_jpg: metadata mismatch from %s — dropping transfer\n", NET_AdrToString(from));
 		screenshot_jpg_free_slot(sl);
+		screenshot_jpg_console_flush();
 		return;
 	}
 
-	if (seq != sl->next_seq) {
-		Com_DPrintf("screenshot_jpg: seq esperado %u recebido %u — a descartar transferencia\n", sl->next_seq, seq);
+	if (seq >= total_chunks) {
+		Com_Printf("screenshot_jpg: seq out of range from %s (seq=%u chunks=%u)\n",
+		    NET_AdrToString(from), seq, total_chunks);
 		screenshot_jpg_free_slot(sl);
+		screenshot_jpg_console_flush();
 		return;
 	}
 
-	if (sl->write_off + payload_len > sl->total_size) {
-		Com_DPrintf("screenshot_jpg: overflow de escrita\n");
+	const uint32_t chunk_off = seq * SCREENSHOT_JPG_CHUNK;
+	const uint32_t expected_len = (seq == total_chunks - 1u) ? (total_size - chunk_off) : SCREENSHOT_JPG_CHUNK;
+	if (expected_len == 0 || expected_len > SCREENSHOT_JPG_CHUNK || payload_len != expected_len
+	    || chunk_off + payload_len > total_size) {
+		Com_Printf("screenshot_jpg: bad chunk geometry from %s (seq=%u payload=%u expect=%u off=%u)\n",
+		    NET_AdrToString(from), seq, payload_len, expected_len, chunk_off);
 		screenshot_jpg_free_slot(sl);
+		screenshot_jpg_console_flush();
 		return;
 	}
 
-	if (!MSG_ReadData(msg, sl->buf + sl->write_off, payload_len)) {
-		Com_Printf("screenshot_jpg: MSG_ReadData falhou (pacote truncado?)\n");
-		screenshot_jpg_free_slot(sl);
+	if (sl->received[seq]) {
+		/* duplicate datagram — common on UDP */
 		return;
 	}
 
-	sl->write_off += payload_len;
-	sl->next_seq++;
-
-	if (sl->next_seq < sl->total_chunks)
-		return;
-
-	if (sl->write_off != sl->total_size) {
-		Com_Printf("screenshot_jpg: tamanho final incoerente\n");
+	if (!MSG_ReadData(msg, sl->buf + chunk_off, payload_len)) {
+		Com_Printf("screenshot_jpg: MSG_ReadData failed from %s (truncated UDP packet?)\n", NET_AdrToString(from));
 		screenshot_jpg_free_slot(sl);
+		screenshot_jpg_console_flush();
 		return;
 	}
 
-	char fname[128];
-	snprintf(fname, sizeof(fname), "screenshot_%u_%i.jpg", session, svs_time);
+	sl->received[seq] = 1;
+	sl->chunks_done++;
 
-	if (FS_WriteFile(fname, (const char*)sl->buf, sl->total_size))
-		Com_Printf("screenshot_jpg: guardado %s (%u bytes) de %s\n", fname, sl->total_size, NET_AdrToString(from));
+	if (sl->chunks_done < sl->total_chunks)
+		return;
+
+	for (uint32_t i = 0; i < sl->total_chunks; i++) {
+		if (!sl->received[i]) {
+			Com_Printf("screenshot_jpg: incomplete from %s (missing chunk %u after count hit — bug?)\n",
+			    NET_AdrToString(from), i);
+			screenshot_jpg_free_slot(sl);
+			screenshot_jpg_console_flush();
+			return;
+		}
+	}
+
+	Com_Printf("screenshot_jpg: assembly complete from %s, writing file...\n", NET_AdrToString(from));
+	screenshot_jpg_console_flush();
+
+	if (!screenshot_jpg_com_append_oob_source(&sl->buf, &sl->total_size, from))
+		Com_DPrintf("screenshot_jpg: COM not stamped with OOB source (no COM after SOI?)\n");
+
+	char savedPath[512];
+	if (screenshot_jpg_save_file(sl->buf, sl->total_size, savedPath, sizeof(savedPath)))
+		Com_Printf("screenshot_jpg: SAVED %s (%u bytes) from %s\n", savedPath, sl->total_size, NET_AdrToString(from));
 	else
-		Com_Printf("screenshot_jpg: FS_WriteFile falhou para %s\n", fname);
+		Com_Printf("screenshot_jpg: SAVE FAILED from %s — %s\n", NET_AdrToString(from), savedPath);
 
+	screenshot_jpg_console_flush();
 	screenshot_jpg_free_slot(sl);
 }
 
