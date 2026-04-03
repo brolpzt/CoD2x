@@ -37,6 +37,10 @@ dvar_t*		showpacketstrings;
 dvar_t*		sv_playerBroadcastLimit;
 int 		nextIPTime = 0;
 dvar_t*		g_competitive;
+/** Sincronizados para o cliente (DVAR_SYSTEMINFO); usados no envio JPEG apos getss. */
+dvar_t*		sv_screenshotQuality;
+dvar_t*		sv_screenshotJpgPaceMs;
+dvar_t*		sv_screenshotJpgLowPriority;
 bool		server_ignoreMapChangeThisFrame = false;
 
 extern dvar_t* g_cod2x;
@@ -55,6 +59,8 @@ static leakyBucket_t* bucketHashes[ MAX_HASHES ];
 leakyBucket_t outboundLeakyBucket = {};
 leakyBucket_t outboundLeakyBucketRcon = {};
 leakyBucket_t outboundLeakyBucketDisconnect = {};
+/** Limite OOB global para screenshot_jpg (separado de getstatus/getinfo). */
+leakyBucket_t screenshotJpgOobLeakyBucket = {};
 
 static long SVC_HashForAddress( netaddr_s address )
 {
@@ -531,6 +537,28 @@ void server_cmd_getIp()
 	}
 }
 
+/** Consola dedicada: `getss <clientnum>` — pede screenshot ao cliente (OOB `screenshot_jpg`, sem gravar disco no cliente). */
+void server_cmd_getss()
+{
+	if (Cmd_Argc() < 2) {
+		Com_Printf("usage: getss <clientnum>   (ex.: getss 0)\n");
+		return;
+	}
+	const int clientNum = atoi(Cmd_Argv(1));
+	if (clientNum < 0 || clientNum >= MAX_CLIENTS) {
+		Com_Printf("getss: client %i invalido (use 0..%i)\n", clientNum, MAX_CLIENTS - 1);
+		return;
+	}
+	client_t& cl = svs_clients[clientNum];
+	if (cl.state == CS_FREE || cl.state == CS_ZOMBIE) {
+		Com_Printf("getss: slot %i vazio (state=%i)\n", clientNum, (int)cl.state);
+		return;
+	}
+	char msg[64];
+	snprintf(msg, sizeof(msg), "%c %s", '|', "takeScreenshot");
+	SV_GameSendServerCommand(clientNum, SV_CMD_RELIABLE, msg);
+}
+
 
 /**
  * Check if the address belongs to a master server.
@@ -920,11 +948,188 @@ bool server_isRateLimitOk(leakyBucket_t* bucket, netaddr_s from, const char* act
 	return true;
 };
 
+// ---- OOB JPEG em chunks (cliente -> servidor) ----
+#define SCREENSHOT_JPG_CHUNK 1200
+#define SCREENSHOT_JPG_MAX_FILE (8 * 1024 * 1024)
+#define SCREENSHOT_JPG_MAX_SLOTS 8
+#define SCREENSHOT_JPG_STALE_MS 120000
+
+struct screenshot_jpg_slot_t {
+	bool in_use;
+	netaddr_s from;
+	uint32_t session;
+	uint32_t total_size;
+	uint32_t total_chunks;
+	uint32_t next_seq;
+	uint32_t write_off;
+	uint8_t* buf;
+	int last_time;
+};
+
+static screenshot_jpg_slot_t screenshot_jpg_slots[SCREENSHOT_JPG_MAX_SLOTS];
+
+static void screenshot_jpg_free_slot(screenshot_jpg_slot_t* sl)
+{
+	if (sl->buf) {
+		free(sl->buf);
+		sl->buf = nullptr;
+	}
+	memset(sl, 0, sizeof(*sl));
+}
+
+static void screenshot_jpg_prune_stale(void)
+{
+	for (int i = 0; i < SCREENSHOT_JPG_MAX_SLOTS; i++) {
+		if (!screenshot_jpg_slots[i].in_use)
+			continue;
+		if (svs_time - screenshot_jpg_slots[i].last_time > SCREENSHOT_JPG_STALE_MS)
+			screenshot_jpg_free_slot(&screenshot_jpg_slots[i]);
+	}
+}
+
+static screenshot_jpg_slot_t* screenshot_jpg_find_slot(netaddr_s from, uint32_t session)
+{
+	for (int i = 0; i < SCREENSHOT_JPG_MAX_SLOTS; i++) {
+		if (!screenshot_jpg_slots[i].in_use)
+			continue;
+		if (screenshot_jpg_slots[i].session != session)
+			continue;
+		if (!NET_CompareAdr(from, screenshot_jpg_slots[i].from))
+			continue;
+		return &screenshot_jpg_slots[i];
+	}
+	return nullptr;
+}
+
+static screenshot_jpg_slot_t* screenshot_jpg_take_free_slot(netaddr_s from, uint32_t session)
+{
+	for (int i = 0; i < SCREENSHOT_JPG_MAX_SLOTS; i++) {
+		if (screenshot_jpg_slots[i].in_use)
+			continue;
+		screenshot_jpg_slot_t* sl = &screenshot_jpg_slots[i];
+		memset(sl, 0, sizeof(*sl));
+		sl->in_use = true;
+		sl->from = from;
+		sl->session = session;
+		sl->last_time = svs_time;
+		return sl;
+	}
+	return nullptr;
+}
+
+static void SV_ConnectionlessPacket_screenshot_jpg(netaddr_s from, msg_t* msg)
+{
+	if (!server_isRateLimitOk(&screenshotJpgOobLeakyBucket, from, "OOB_screenshot_jpg", 80, 1000, 512, 1000))
+		return;
+
+	if (Cmd_Argc() < 6) {
+		Com_DPrintf("screenshot_jpg: argc insuficiente\n");
+		return;
+	}
+
+	const uint32_t session = (uint32_t)strtoul(Cmd_Argv(1), nullptr, 10);
+	const uint32_t seq = (uint32_t)strtoul(Cmd_Argv(2), nullptr, 10);
+	const uint32_t total_chunks = (uint32_t)strtoul(Cmd_Argv(3), nullptr, 10);
+	const uint32_t total_size = (uint32_t)strtoul(Cmd_Argv(4), nullptr, 10);
+	const uint32_t payload_len = (uint32_t)strtoul(Cmd_Argv(5), nullptr, 10);
+
+	if (total_size == 0 || total_size > SCREENSHOT_JPG_MAX_FILE || total_chunks == 0
+	    || payload_len == 0 || payload_len > SCREENSHOT_JPG_CHUNK) {
+		Com_DPrintf("screenshot_jpg: parametros invalidos\n");
+		return;
+	}
+
+	const uint32_t need_chunks = (total_size + SCREENSHOT_JPG_CHUNK - 1u) / SCREENSHOT_JPG_CHUNK;
+	if (total_chunks != need_chunks) {
+		Com_DPrintf("screenshot_jpg: total_chunks incoerente com total_size\n");
+		return;
+	}
+
+	msg->bit = 0;
+
+	screenshot_jpg_slot_t* sl = screenshot_jpg_find_slot(from, session);
+
+	if (seq == 0) {
+		if (sl)
+			screenshot_jpg_free_slot(sl);
+		sl = screenshot_jpg_take_free_slot(from, session);
+		if (!sl) {
+			Com_Printf("screenshot_jpg: sem slots livres (max %i)\n", SCREENSHOT_JPG_MAX_SLOTS);
+			return;
+		}
+		sl->total_size = total_size;
+		sl->total_chunks = total_chunks;
+		sl->next_seq = 0;
+		sl->write_off = 0;
+		sl->buf = (uint8_t*)malloc(total_size);
+		if (!sl->buf) {
+			Com_Printf("screenshot_jpg: malloc(%u) falhou\n", total_size);
+			screenshot_jpg_free_slot(sl);
+			return;
+		}
+	} else {
+		if (!sl) {
+			Com_DPrintf("screenshot_jpg: chunk orfao (seq=%u)\n", seq);
+			return;
+		}
+	}
+
+	sl->last_time = svs_time;
+
+	if (sl->total_size != total_size || sl->total_chunks != total_chunks || sl->session != session) {
+		Com_DPrintf("screenshot_jpg: metadados inconsistentes\n");
+		screenshot_jpg_free_slot(sl);
+		return;
+	}
+
+	if (seq != sl->next_seq) {
+		Com_DPrintf("screenshot_jpg: seq esperado %u recebido %u — a descartar transferencia\n", sl->next_seq, seq);
+		screenshot_jpg_free_slot(sl);
+		return;
+	}
+
+	if (sl->write_off + payload_len > sl->total_size) {
+		Com_DPrintf("screenshot_jpg: overflow de escrita\n");
+		screenshot_jpg_free_slot(sl);
+		return;
+	}
+
+	if (!MSG_ReadData(msg, sl->buf + sl->write_off, payload_len)) {
+		Com_Printf("screenshot_jpg: MSG_ReadData falhou (pacote truncado?)\n");
+		screenshot_jpg_free_slot(sl);
+		return;
+	}
+
+	sl->write_off += payload_len;
+	sl->next_seq++;
+
+	if (sl->next_seq < sl->total_chunks)
+		return;
+
+	if (sl->write_off != sl->total_size) {
+		Com_Printf("screenshot_jpg: tamanho final incoerente\n");
+		screenshot_jpg_free_slot(sl);
+		return;
+	}
+
+	char fname[128];
+	snprintf(fname, sizeof(fname), "screenshot_%u_%i.jpg", session, svs_time);
+
+	if (FS_WriteFile(fname, (const char*)sl->buf, sl->total_size))
+		Com_Printf("screenshot_jpg: guardado %s (%u bytes) de %s\n", fname, sl->total_size, NET_AdrToString(from));
+	else
+		Com_Printf("screenshot_jpg: FS_WriteFile falhou para %s\n", fname);
+
+	screenshot_jpg_free_slot(sl);
+}
+
 
 void SV_ConnectionlessPacket( netaddr_s from, msg_t *msg )
 {
 	char* s;
 	const char* c;
+
+	screenshot_jpg_prune_stale();
 
 	MSG_BeginReading(msg);
 	MSG_ReadLong(msg); // skip the -1 marker
@@ -1001,6 +1206,10 @@ void SV_ConnectionlessPacket( netaddr_s from, msg_t *msg )
 			const char* ip = Cmd_Argv(1);
 			Com_Printf("Server IP: %s\n", ip);
 		}
+	}
+	else if (Q_stricmp(c, "screenshot_jpg") == 0)
+	{
+		SV_ConnectionlessPacket_screenshot_jpg(from, msg);
 	}
 	// CoD2x: End
 	else if (Q_stricmp( c,"disconnect") == 0)
@@ -1311,15 +1520,30 @@ void server_init()
 	dvarFlags_e noWriteForClientFlag = (dedicated->value.integer == 0) ? DEBUG_RELEASE(DVAR_CHEAT, DVAR_NOWRITE) : DVAR_NOFLAG;
 	g_competitive = Dvar_RegisterBool("g_competitive", false, (enum dvarFlags_e)(noWriteForClientFlag | DVAR_SYSTEMINFO | DVAR_CHANGEABLE_RESET));
 
+	sv_screenshotQuality = Dvar_RegisterInt(
+		"sv_screenshotQuality",
+		85,
+		1,
+		100,
+		(enum dvarFlags_e)(DVAR_SYSTEMINFO | DVAR_CHANGEABLE_RESET));
+	sv_screenshotJpgPaceMs = Dvar_RegisterInt(
+		"sv_screenshotJpgPaceMs",
+		2,
+		0,
+		50,
+		(enum dvarFlags_e)(DVAR_SYSTEMINFO | DVAR_CHANGEABLE_RESET));
+	sv_screenshotJpgLowPriority = Dvar_RegisterBool(
+		"sv_screenshotJpgLowPriority",
+		true,
+		(enum dvarFlags_e)(DVAR_SYSTEMINFO | DVAR_CHANGEABLE_RESET));
+
 
     Cmd_AddCommand("unbanAll", server_unbanAll_command);
 
 	// CoD2x: Command to get IP and port of this server
-	Cmd_AddCommand("getIp", server_cmd_getIp); 
+	Cmd_AddCommand("getIp", server_cmd_getIp);
+	Cmd_AddCommand("getss", server_cmd_getss);
 }
-
-
-
 
 // Server side hooks
 // The hooked functions are the same for both Windows and Linux
@@ -1375,8 +1599,6 @@ void server_patch()
 	// Hook the SV_UserInfoChanged function
 	patch_call(ADDR(0x00454626, 0x0808eedb), (unsigned int)WL(SV_UserinfoChanged_Win32, SV_UserinfoChanged)); // SV_DirectConnect
 	patch_call(ADDR(0x00455c32, 0x08090a36), (unsigned int)WL(SV_UserinfoChanged_Win32, SV_UserinfoChanged)); // SV_UpdateUserinfo_f
-
-
 
 	// Hook the function for changing map
 	patch_int32(ADDR(0x00452adb + 1, 0x0808cdf0 + 4), (unsigned int)cmd_map); 			// Cmd_AddCommand("map", cmd_map);

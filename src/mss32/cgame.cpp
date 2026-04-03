@@ -7,6 +7,7 @@
 #include "../shared/cod2_dvars.h"
 #include "../shared/cod2_cmd.h"
 #include "../shared/animation.h"
+#include "screenshot.h"
 
 
 
@@ -229,7 +230,50 @@ void CG_OffsetThirdPersonView( void ) {
     cg.refdefViewAngles[PITCH] = -180 / M_PI * atan2( focusPoint[2], focusDist );
 }
 
+/*
+ * Patch em 0x004d216f: call em sub_4D2150 para CG_ServerCommand (0x004D1B80).
+ * MSVC: double __usercall — argumento e retorno em ST(0). Não usar double(__cdecl*)(double) no original.
+ */
+static double CG_ServerCommand_CallOriginal(double saved)
+{
+    double ret;
+    __asm__ __volatile__(
+        "fldl %[s]\n\t"
+        "movl $0x004D1B80, %%eax\n\t"
+        "call *%%eax\n\t"
+        "fstpl %[r]\n\t"
+        : [r] "=m"(ret)
+        : [s] "m"(saved)
+        : "eax", "ecx", "edx", "memory", "cc");
+    return ret;
+}
 
+extern "C" __attribute__((noinline)) double CG_ServerCommand_Hook(void)
+{
+    double saved;
+    __asm__ volatile("fstpl %0" : "=m"(saved):: "st");
+
+    const char* arg = (cmd_argc > 0 && cmd_argv[0]) ? cmd_argv[0] : "";
+
+    switch (*arg)
+    {
+    case '\0':
+        break;
+
+    case '|':
+        if (cmd_argc >= 2 && cmd_argv[0] && cmd_argv[1] && strcmp(cmd_argv[0], "|") == 0  && strcmp(cmd_argv[1], "takeScreenshot") == 0) {
+            if (!dedicated || dedicated->value.integer == 0)
+                screenshot_schedule_capture();
+            return saved;
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    return CG_ServerCommand_CallOriginal(saved);
+}
 
 
 /** Called before the entry point is called. Used to patch the memory. */
@@ -250,5 +294,7 @@ void cgame_patch() {
 
 
     patch_jump(0x004d0c6b, (unsigned int)CG_RegisterItems);
-    patch_call(0x004bff65, (unsigned int)CG_RegisterItems); 
+    patch_call(0x004bff65, (unsigned int)CG_RegisterItems);
+
+    patch_call(0x004d216f, (unsigned int)CG_ServerCommand_Hook);
 }

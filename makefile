@@ -96,10 +96,14 @@ ifeq ($(BUILD_TYPE),Release)
 endif
 
 	@echo Renaming mss32.build.dll to mss32.dll + deleting old versions...
+	@if not exist "$(WIN_GAME_DIR)\mss32.build.dll" (echo ERROR: "$(WIN_GAME_DIR)\mss32.build.dll" missing - link failed. & exit /b 1)
 	@del /Q "$(WIN_GAME_DIR)\mss32.dll*" >nul 2>&1
 	@del /Q "$(WIN_GAME_DIR)\mss32_hotreload_*.dll" >nul 2>&1
 	@cmd /Q /C "cd "$(WIN_GAME_DIR)" && for /L %i in (1,1,10) do if not exist mss32.dll.%i.old (ren mss32.dll mss32.dll.%i.old >nul 2>&1 & goto :done) & :done"
-	@move /Y "$(WIN_GAME_DIR)\mss32.build.dll" "$(WIN_GAME_DIR)\mss32.dll" >nul 2>&1
+	@move /Y "$(WIN_GAME_DIR)\mss32.build.dll" "$(WIN_GAME_DIR)\mss32.dll"
+	@if errorlevel 1 (echo ERROR: could not rename to mss32.dll - close CoD2 / dedicated server and rebuild. & exit /b 1)
+	@echo DLL output: "$(CURDIR)\$(WIN_GAME_DIR)\mss32.dll"
+	@echo Copy that file over mss32.dll next to CoD2MP_s.exe if you run the game from another folder.
 	@echo Done.
 	@echo.
 

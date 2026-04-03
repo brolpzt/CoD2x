@@ -4,6 +4,7 @@
 #include "shared.h"
 #include "assembly.h"
 #include "cod2_common.h"
+#include <limits.h>
 
 
 enum netadrtype_e
@@ -241,5 +242,20 @@ inline char* MSG_ReadString(msg_t* msg) {
     return ret;
 }
 #endif
+
+/** Leitura byte-aligned (equivalente ao MSG_ReadData do motor). */
+inline bool MSG_ReadData(msg_t* msg, void* dest, size_t len) {
+	if (!msg || !dest || msg->overflowed)
+		return false;
+	if (len > (size_t)INT_MAX || msg->readcount > msg->cursize || (int)len > msg->cursize - msg->readcount) {
+		msg->overflowed = 1;
+		return false;
+	}
+	memcpy(dest, msg->data + msg->readcount, len);
+	msg->readcount += (int)len;
+	return true;
+}
+
+int NET_SendPacket(netsrc_e sock, int length, const void* data, netaddr_s addr_to);
 
 #endif
