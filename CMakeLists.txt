@@ -120,7 +120,7 @@ if (WIN32)
   )
 
   target_link_libraries(mss32 PRIVATE
-    kernel32 wininet dbghelp ole32 oleaut32 uuid gdi32
+    kernel32 wininet dbghelp ole32 oleaut32 uuid gdi32 d3d9 windowscodecs
     "${CMAKE_SOURCE_DIR}/tools/openssl_mingw/lib/libssl.a"
     "${CMAKE_SOURCE_DIR}/tools/openssl_mingw/lib/libcrypto.a"
     ws2_32 crypt32

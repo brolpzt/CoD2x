@@ -3,6 +3,7 @@
 #include "../shared/cod2_client.h"
 #include "../shared/cod2_dvars.h"
 #include "demo.h"
+#include "screenshot.h"
 #include "radar.h"
 #include "shared.h"
 
@@ -256,6 +257,7 @@ void drawing_end(int num) {
     //UI_DrawText("CoD2x Mod", INT_MAX, fontNormal, 10.0f, 50.0f, HORIZONTAL_ALIGN_LEFT, VERTICAL_ALIGN_TOP, 1.0f, colWhite, TEXT_STYLE_NORMAL);
 
     demo_drawing();
+    screenshot_on_drawing_end();
 
     uint32_t addr = *(uint32_t*)0x0068a2b8;
     ASM_CALL(RETURN_VOID, addr, 1, PUSH(num));

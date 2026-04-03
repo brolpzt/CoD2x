@@ -26,6 +26,7 @@
 #include "error.h"
 #include "downloading.h"
 #include "demo.h"
+#include "screenshot.h"
 #include "vmix.h"
 #include "debug.h"
 #include "../shared/iwd.h"
@@ -85,6 +86,7 @@ void hook_Com_Frame()
             weapons_unload();
             radar_unload();
             demo_unload();
+            screenshot_unload();
 
             hotreload_loadDLL();
             return;
@@ -193,6 +195,7 @@ void hook_CL_Init() {
     drawing_init();
     radar_init();
     demo_init();
+    screenshot_init();
     vmix_init();
     
     if (!DLL_HOTRELOAD) {
